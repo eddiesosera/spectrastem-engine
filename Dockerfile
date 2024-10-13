@@ -1,23 +1,29 @@
-# Uses the official Python image
-FROM python:3.9-slim
+# Use the official Python image
+FROM python:3.9.13-slim
 
-# Sets the working directory in the container
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the working directory in the container
 WORKDIR /app
 
-# Copies requirements.txt to the container
+# Copy only requirements.txt to leverage Docker cache
 COPY requirements.txt .
 
-# Installs Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies with increased timeout
+RUN pip install --no-cache-dir --default-timeout=5000 -r requirements.txt
 
-# Copies the current directory contents into the container at /app
+# Copy the current directory contents into the container at /app
 COPY . .
 
-# Exposes port 5000 (Heroku will override this with $PORT)
+# Expose port 5000 (Heroku will set the PORT environment variable)
 EXPOSE 5000
 
-# Sets environment variables for Flask
+# Set environment variables for Flask
 ENV FLASK_ENV=production
 
-# Sets the entry point to Gunicorn (as indicated in your Procfile)
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:$PORT", "wsgi:app"]
+# Start the application with reduced Gunicorn workers
+CMD ["sh", "-c", "gunicorn -w 2 -b 0.0.0.0:$PORT wsgi:app"]
