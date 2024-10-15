@@ -1,0 +1,12 @@
+# Ignore everything
+
+-
+
+# Except these files
+
+!Dockerfile
+!Dockerrun.aws.json
+!requirements.txt
+!wsgi.py
+!application.py
+!your_application_module/

@@ -1,29 +1,51 @@
-# Use the official Python image
+# Stage 1: Build Stage
+FROM python:3.9.13-slim AS builder
+
+# Install system dependencies required for building
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the working directory
+WORKDIR /app
+
+# Copy requirements.txt
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --user --no-cache-dir --default-timeout=5000 -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Remove unnecessary files
+RUN rm -rf tests/ docs/ media/ uploads/ stems_output/ outputs/ tmp/
+
+# Stage 2: Final Stage
 FROM python:3.9.13-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
+# Install only runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory in the container
+# Set the working directory
 WORKDIR /app
 
-# Copy only requirements.txt to leverage Docker cache
-COPY requirements.txt .
+# Copy the dependencies from the builder stage
+COPY --from=builder /root/.local /root/.local
 
-# Install Python dependencies with increased timeout
-RUN pip install --no-cache-dir --default-timeout=5000 -r requirements.txt
+# Copy the application code from the builder stage
+COPY --from=builder /app /app
 
-# Copy the current directory contents into the container at /app
-COPY . .
+# Set PATH
+ENV PATH=/root/.local/bin:$PATH
 
-# Expose port 5000 (Heroku will set the PORT environment variable)
+# Expose port 5000
 EXPOSE 5000
 
-# Set environment variables for Flask
+# Set environment variables
 ENV FLASK_ENV=production
 
-# Start the application with reduced Gunicorn workers
-CMD ["sh", "-c", "gunicorn -w 2 -b 0.0.0.0:$PORT wsgi:app"]
+# Start the application
+CMD ["sh", "-c", "gunicorn -w 2 -b 0.0.0.0:$PORT application:app"]

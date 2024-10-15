@@ -1,0 +1,17 @@
+{
+  "AWSEBDockerrunVersion": 2,
+  "containerDefinitions": [
+    {
+      "name": "spectrastem-engine",
+      "image": "588738575455.dkr.ecr.us-east-1.amazonaws.com/spectrastem-engine:latest",
+      "essential": true,
+      "memory": 8192,
+      "portMappings": [
+        {
+          "hostPort": 80,
+          "containerPort": 5000
+        }
+      ]
+    }
+  ]
+}

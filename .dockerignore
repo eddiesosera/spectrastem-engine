@@ -1,9 +1,32 @@
+# Exclude git repository
 .git
+
+# Python cache
 __pycache__/
 *.pyc
+
+# Environment variables and config
 .env
 .DS_Store
+
+# Media and uploads
+media/
+uploads/
+stems_output/
+outputs/
+tmp/
+
+# Data files
 *.mp3
 *.wav
-media/
 
+# Node modules (if any)
+node_modules/
+
+# Docker files
+Dockerfile
+docker-compose.yml
+
+# Other unnecessary files or directories
+tests/
+docs/
