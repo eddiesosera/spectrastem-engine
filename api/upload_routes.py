@@ -1,134 +1,92 @@
-# File: engine/api/upload_routes.py
+# engine/api/upload_routes.py
+
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from utils.validators import allowed_file, validate_file_size
-from audio_processing.stem_separation import separate_audio_with_demucs
-from audio_processing.midi_generation import generate_midi_from_audio
-from audio_processing.midi_generation import generate_midi_with_basic_pitch
 from utils.aws_s3 import upload_to_s3
-from utils.status_tracker import update_status
+from audio_processing.stem_separation import separate_audio_with_demucs
+from audio_processing.midi_generation import generate_midi_with_basic_pitch
 import os
 import logging
+import uuid
+
+from utils.status_tracker import status_tracker, status_lock
+
+upload_blueprint = Blueprint('upload', __name__)
 
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-upload_blueprint = Blueprint('upload', __name__)
-
 @upload_blueprint.route('/api/upload-audio', methods=['POST'])
 def upload_audio():
     if 'file' not in request.files:
-        logging.error('No file part in the request')
-        return jsonify({"error": "No file provided"}), 400
+        logging.error("No file part in the request")
+        return jsonify({"status": "Error", "message": "No file provided"}), 400
 
     file = request.files['file']
     if file.filename == '':
-        logging.error('No file selected')
-        return jsonify({"error": "No file selected"}), 400
+        logging.error("No file selected")
+        return jsonify({"status": "Error", "message": "No file selected"}), 400
 
-    if not allowed_file(file.filename):
-        logging.error(f'File format not allowed: {file.filename}')
-        return jsonify({"error": "Invalid file format. Allowed formats are mp3, wav, flac, ogg, aac."}), 400
+    # Secure and clean filename
+    original_filename = secure_filename(file.filename)
+    base_track_name = os.path.splitext(original_filename)[0].strip()
 
-    if not validate_file_size(file):
-        logging.error(f'File too large: {file.filename}')
-        return jsonify({"error": f"File exceeds the size limit of 50MB."}), 400
+    # Generate a unique track ID
+    unique_id = uuid.uuid4().hex
+    unique_track_name = f"{base_track_name}_{unique_id}"
 
-    filename = secure_filename(file.filename)
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    # Save the file locally
+    file_extension = os.path.splitext(original_filename)[1]
+    file_path = os.path.join(UPLOAD_FOLDER, unique_track_name + file_extension)
     file.save(file_path)
-    logging.info(f'File saved at {file_path}')
 
-    track_name = filename  # Use full filename including extension
+    # Initialize processing in the status tracker with thread safety
+    with status_lock:
+        status_tracker[unique_track_name] = {"status": "Processing", "results": None}
+        logging.info(f"Track '{unique_track_name}' is being processed. Initial status set.")
+        logging.info(f"Current status_tracker: {status_tracker}")  # Added logging
 
-    # Trigger processing for both MIDI and stem separation
-    responses = {}
-    process_stems = request.form.get('process_stems', 'true').lower() == 'true'
-    generate_midi = request.form.get('generate_midi', 'true').lower() == 'true'
-
-    # Process stem separation if selected
-    if process_stems:
-        stem_response = process_audio_from_upload(file_path, track_name)
-        responses["stems"] = stem_response
-
-    # Generate MIDI if selected
-    if generate_midi:
-        midi_response = process_midi_generation(file_path, track_name)
-        responses["midi"] = midi_response
-
-    return jsonify(responses), 200
-
-def process_audio_from_upload(file_path, track_name):
+    # Process the file
     try:
-        logging.info(f"Triggering audio processing for {track_name}")
+        responses = {}
+        if request.form.get('process_stems', 'true').lower() == 'true':
+            responses["stems"] = process_stems_audio(file_path, unique_track_name, 'all')
+            logging.info(f"Stems processing completed for track '{unique_track_name}'.")
 
-        # Update status to "Processing"
-        update_status(track_name, "Processing", "Demucs Starting")
+        if request.form.get('generate_midi', 'true').lower() == 'true':
+            responses["midi"] = process_midi_audio(file_path, unique_track_name)
+            logging.info(f"MIDI generation completed for track '{unique_track_name}'.")
 
-        # Start the stem separation process
-        output_dir = f"./stems_output/{track_name}"
-        result = separate_audio_with_demucs(file_path, "two_stems", output_dir)
-
-        # Check if the process completed successfully
-        if result.returncode != 0:
-            logging.error(f"Demucs failed with return code {result.returncode}")
-            update_status(track_name, "Failed", "Error during Demucs processing")
-            return {"error": "Demucs processing failed"}
-
-        # Update status to "Uploading to S3"
-        update_status(track_name, "Processing", "Uploading to S3")
-
-        # Upload the stems to S3
-        s3_urls = upload_to_s3(output_dir, track_name, s3_subfolder='stems')
-
-        # Update status to "Completed"
-        update_status(track_name, "Completed", "Done", stems=s3_urls)
-
-        logging.info(f"Processing completed successfully for {track_name}")
-        return {
-            "message": "Processing completed successfully",
-            "track_name": track_name,
-            "status": "Completed",
-            "stems": s3_urls
-        }
+        # Update the tracker when everything completes successfully
+        with status_lock:
+            status_tracker[unique_track_name] = {"status": "Completed", "results": responses}
+            logging.info(f"Current status_tracker: {status_tracker}")  # Added logging
+        logging.info(f"Track '{unique_track_name}' processing completed successfully. Status updated.")
+        return jsonify({"status": "Uploaded", "track_name": unique_track_name}), 200
 
     except Exception as e:
-        logging.error(f"Error during processing: {e}")
-        update_status(track_name, "Failed", "Error during processing")
-        return {"error": "Error during processing", "details": str(e)}
+        logging.error(f"Error processing '{unique_track_name}': {e}")
+        with status_lock:
+            status_tracker[unique_track_name] = {"status": "Error", "message": "Processing failed"}
+            logging.info(f"Current status_tracker: {status_tracker}")  # Added logging
+        return jsonify({"status": "Error", "message": "Processing failed"}), 500
 
-def process_midi_generation(file_path, track_name):
-    try:
-        logging.info(f"Triggering MIDI generation for {track_name}")
+# Helper functions to process audio
+def process_stems_audio(file_path, track_name, stems_type):
+    output_dir = f"./stems_output/{track_name}"
+    separation_mode = "four_stems" if stems_type == "all" else "two_stems"
+    result = separate_audio_with_demucs(file_path, separation_mode, output_dir)
+    if result.returncode != 0:
+        raise Exception("Demucs processing failed")
 
-        # Update status to "Processing"
-        update_status(track_name, "Processing", "MIDI Generation Starting")
+    s3_urls = upload_to_s3(output_dir, track_name, s3_subfolder='stems')
+    return {"status": "Completed", "message": "Stem separation completed", "stems": s3_urls}
 
-        # Create output directory for MIDI files
-        output_dir = f"./midis/{track_name}"
-        os.makedirs(output_dir, exist_ok=True)
+def process_midi_audio(file_path, track_name):
+    output_dir = f"./midis/{track_name}"
+    midi_file_path = generate_midi_with_basic_pitch(file_path, output_dir)
+    if not midi_file_path:
+        raise Exception("MIDI generation failed")
 
-        # Generate MIDI file using Basic Pitch
-        midi_file_path = generate_midi_with_basic_pitch(file_path, output_dir)
-
-        if not midi_file_path:
-            raise Exception("MIDI generation failed.")
-
-        # Upload MIDI file to S3 under the 'midis' folder
-        midi_s3_urls = upload_to_s3(output_dir, track_name, s3_subfolder='midis')
-
-        # Update status to "Completed"
-        update_status(track_name, "Completed", "MIDI Generation Done", midi=midi_s3_urls)
-
-        logging.info(f"MIDI generation completed successfully for {track_name}")
-        return {
-            "message": "MIDI generation completed successfully",
-            "track_name": track_name,
-            "status": "Completed",
-            "midi_files": midi_s3_urls
-        }
-
-    except Exception as e:
-        logging.error(f"Error during MIDI generation: {e}")
-        update_status(track_name, "Failed", "Error during MIDI generation")
-        return {"error": "Error during MIDI generation", "details": str(e)}
+    midi_s3_urls = upload_to_s3(output_dir, track_name, s3_subfolder='midis')
+    return {"status": "Completed", "message": "MIDI generation completed", "midi_files": midi_s3_urls}
